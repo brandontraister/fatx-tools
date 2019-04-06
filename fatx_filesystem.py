@@ -360,7 +360,7 @@ class FatXVolume(object):
         self.infile.seek(self.cluster_to_physical_offset(cluster))
 
     def byte_offset_to_cluster(self, offset):
-        return (offset / self.bytes_per_cluster) + 1
+        return (offset // self.bytes_per_cluster) + 1
 
     def byte_offset_to_physical_offset(self, offset):
         return self.offset + offset
@@ -417,7 +417,7 @@ class FatXVolume(object):
         # most commonly 0x4000
         self.bytes_per_cluster = self.sectors_per_cluster * FATX_SECTOR_SIZE
         
-        self.max_clusters = (self.length / self.bytes_per_cluster) + 1  # +1 is reserved_fat_entries
+        self.max_clusters = (self.length // self.bytes_per_cluster) + 1  # +1 is reserved_fat_entries
         if self.max_clusters < 0xfff0:
             bytes_per_fat = self.max_clusters * 2
             self.fat16x = True
