@@ -33,10 +33,6 @@ class FatXTimeStamp(object):
         )
 
     @property
-    def _log(self):
-        return logging.getLogger('FATX.FileSystem.TimeStamp')
-
-    @property
     def year(self):
         raise NotImplementedError
 
@@ -67,7 +63,7 @@ class FatXTimeStamp(object):
     @property
     def sec(self):
         if not self._sec:
-            self._sec = self._time & 0x1F
+            self._sec = (self._time & 0x1F) * 2
         return self._sec
 
     @property
@@ -91,10 +87,6 @@ class FatXTimeStamp(object):
 class X360TimeStamp(FatXTimeStamp):
     """A FatXTimeStamp for Xbox 360."""
     @property
-    def _log(self):
-        return logging.getLogger('FATX.FileSystem.TimeStamp.X360')
-
-    @property
     def year(self):
         """
         Returns (int):
@@ -107,10 +99,6 @@ class X360TimeStamp(FatXTimeStamp):
 
 class XTimeStamp(FatXTimeStamp):
     """A FatXTimeStamp for Xbox."""
-    @property
-    def _log(self):
-        return logging.getLogger('FATX.FileSystem.TimeStamp.X')
-
     @property
     def year(self):
         """
@@ -159,6 +147,7 @@ class FatXDirent(object):
         self.last_write_time = None
         self.last_access_time = None
         self.deleted = True
+        self._log = logging.getLogger('FATX.FileSystem.DirEnt')
 
         x360 = self.volume.endian_fmt == '>'
         ts = X360TimeStamp if x360 else XTimeStamp
@@ -183,10 +172,6 @@ class FatXDirent(object):
                         'deleted ' if self.deleted else '',
                         'directory' if self.is_directory else 'file',
                         self.file_name)
-
-    @property
-    def _log(self):
-        return logging.getLogger('FATX.FileSystem.DirEnt')
 
     @classmethod
     def from_file(cls, f, volume):
@@ -318,10 +303,7 @@ class FatXVolume(object):
         self.signature = self.serial_number = self.sectors_per_cluster = self.root_dir_first_cluster = \
             self.bytes_per_cluster = self.max_clusters = self.fat_byte_offset = self.file_area_byte_offset = 0
         self.fat16x = False
-
-    @property
-    def _log(self):
-        return logging.getLogger('FATX.FileSystem.Volume')
+        self._log = logging.getLogger('FATX.FileSystem.Volume')
 
     def mount(self):
         self._log.info('Mounting volume at 0x%X (length=0x%X)', self.offset, self.length)

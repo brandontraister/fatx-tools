@@ -1,16 +1,35 @@
 from __future__ import print_function
-from fatx_filesystem import (FatXDirent,
-                             DIRENT_DELETED, DIRENT_NEVER_USED,
-                             DIRENT_NEVER_USED2, FATX_FILE_NAME_LEN)
 import time
 import os
 import string
 import logging
 
+from multiprocessing.pool import ThreadPool
+
+from fatx_filesystem import (FatXDirent,
+                             DIRENT_DELETED, DIRENT_NEVER_USED,
+                             DIRENT_NEVER_USED2, FATX_FILE_NAME_LEN)
+
 __all__ = ['FatXOrphan', 'FatXAnalyzer']
 
 VALID_CHARS = set(string.ascii_letters + string.digits + '!#$%&\'()-.@[]^_`{}~ ')
 LOG = logging.getLogger('FATX.Analyzer')
+
+
+class LimitedThreadPool(ThreadPool):
+    """
+    A ThreadPool that will block on apply_async if there are too many items in the queue.
+
+    This is to avoid putting a 250GB file in the queue.
+    """
+    def apply_async(self, *args, **kwargs):
+        ignore_limits = False
+        if 'ignore_limits' in kwargs:
+            ignore_limits = kwargs.pop('ignore_limits')
+        if not ignore_limits:
+            while self._inqueue.qsize() > 100:
+                time.sleep(5)
+        super(LimitedThreadPool, self).apply_async(*args, **kwargs)
 
 
 class FatXOrphan(FatXDirent):
@@ -163,9 +182,8 @@ class FatXAnalyzer:
                 max_clusters == 0):
             max_clusters = self.volume.max_clusters
 
-        for cluster in range(1, max_clusters):
-            self.current_block = cluster
-            cache = self.volume.read_cluster(cluster)
+        def read_cluster(i, data):
+            self.current_block = max(self.current_block, i)
 
             for x in range(256):
                 offset = x * 0x40
@@ -173,14 +191,22 @@ class FatXAnalyzer:
                 # Optimization: Don't bother reading if file_name_length
                 # is DIRENT_NEVER_USED or DIRENT_NEVER_USED2
                 # Also avoid 1 character file_name_length
-                if cache[offset] in ('\x00', '\x01', '\xff'):
+                if data[offset] in ('\x00', '\x01', '\xff'):
                     continue
 
-                dirent = FatXOrphan(cache[offset:offset+0x40], self.volume)
+                dirent = FatXOrphan(data[offset:offset+0x40], self.volume)
 
                 if dirent.is_valid:
                     dirent.set_cluster(cluster)
                     orphans.append(dirent)
+
+        tp = LimitedThreadPool()
+
+        for cluster in range(1, max_clusters):
+            tp.apply_async(read_cluster, args=(cluster, self.volume.read_cluster(cluster)))
+
+        tp.close()
+        tp.join()
 
         self.orphanage = orphans
 
@@ -194,7 +220,7 @@ class FatXAnalyzer:
     def link_orphans(self):
         """ Link parent directories with their children. """
         for orphan in self.orphanage:
-            if orphan.is_directory():
+            if orphan.is_directory:
                 self.find_children(orphan)
 
         # find root directories
