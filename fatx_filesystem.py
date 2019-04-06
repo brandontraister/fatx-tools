@@ -166,14 +166,15 @@ class FatXDirent:
         self.last_access_time = ts(last_access_time_i)
         self.deleted = file_name_length == DIRENT_DELETED
 
-        if self.deleted:
-            self.file_name = self.file_name.split('\xff')[0]
-        elif file_name_length in (DIRENT_NEVER_USED, DIRENT_NEVER_USED):
+        if file_name_length in (DIRENT_NEVER_USED, DIRENT_NEVER_USED):
             # TODO: I don't like that file_name is None means this is invalid. Perhaps we should raise an exception here
             #   and catch that? Perhaps TypeError
             self.file_name = None
+        elif self.deleted:
+            self.file_name = self.file_name.split('\xff')[0]
         else:
             self.file_name = self.file_name[:file_name_length]
+            self._log.debug('Read file %s', self.file_name)
 
     @property
     def _log(self):
