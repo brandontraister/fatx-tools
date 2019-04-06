@@ -24,13 +24,10 @@ class FatXOrphan(FatXDirent):
     # @profile
     def is_valid(self):
         """ Checks if this recovered dirent is actually valid. """
-        name_len = DIRENT_DELETED if self.deleted else len(self.file_name)
-
-        # DIRENT_NEVER_USED is never set by the kernel
-        # DIRENT_NEVER_USED2 is set during initialization
-        # and after a format
-        if name_len == DIRENT_NEVER_USED:
+        if self.file_name is None:
             return False
+
+        name_len = DIRENT_DELETED if self.deleted else len(self.file_name)
 
         # FILE or DIR
         if (self.file_attributes != 0x00 and

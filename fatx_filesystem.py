@@ -141,7 +141,7 @@ DIRENT_DELETED      = 0xE5
 DIRENT_NEVER_USED2  = 0xFF
 
 
-class FatXDirent:
+class FatXDirent(object):
     def __init__(self, data, volume):
         (file_name_length,
          self.file_attributes,
@@ -158,6 +158,7 @@ class FatXDirent:
         self.creation_time = None
         self.last_write_time = None
         self.last_access_time = None
+        self.deleted = True
 
         x360 = self.volume.endian_fmt == '>'
         ts = X360TimeStamp if x360 else XTimeStamp
@@ -166,15 +167,22 @@ class FatXDirent:
         self.last_access_time = ts(last_access_time_i)
         self.deleted = file_name_length == DIRENT_DELETED
 
-        if file_name_length in (DIRENT_NEVER_USED, DIRENT_NEVER_USED):
+        # DIRENT_NEVER_USED is never set by the kernel
+        # DIRENT_NEVER_USED2 is set during initialization
+        if file_name_length in (DIRENT_NEVER_USED, DIRENT_NEVER_USED2):
             # TODO: I don't like that file_name is None means this is invalid. Perhaps we should raise an exception here
             #   and catch that? Perhaps TypeError
             self.file_name = None
+            return
         elif self.deleted:
             self.file_name = self.file_name.split('\xff')[0]
         else:
             self.file_name = self.file_name[:file_name_length]
-            self._log.debug('Read file %s', self.file_name)
+
+        self._log.debug('Read %s%s %s',
+                        'deleted ' if self.deleted else '',
+                        'directory' if self.is_directory else 'file',
+                        self.file_name)
 
     @property
     def _log(self):
@@ -195,7 +203,7 @@ class FatXDirent:
 
     @property
     def is_file(self):
-        return not self.is_directory
+        return not bool(self.file_attributes & FILE_ATTRIBUTE_DIRECTORY)
 
     @property
     def is_directory(self):
