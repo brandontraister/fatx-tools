@@ -1,25 +1,30 @@
 from __future__ import print_function
 from fatx_filesystem import (FatXDirent,
-                            DIRENT_DELETED, DIRENT_NEVER_USED,
-                            DIRENT_NEVER_USED2, FATX_FILE_NAME_LEN)
+                             DIRENT_DELETED, DIRENT_NEVER_USED,
+                             DIRENT_NEVER_USED2, FATX_FILE_NAME_LEN)
 import time
 import os
 import string
 import logging
-
-from datetime import datetime
 
 __all__ = ['FatXOrphan', 'FatXAnalyzer']
 
 VALID_CHARS = set(string.ascii_letters + string.digits + '!#$%&\'()-.@[]^_`{}~ ')
 LOG = logging.getLogger('FATX.Analyzer')
 
+
 class FatXOrphan(FatXDirent):
     """ An orphaned directory entry. """
-    #@profile
+
+    def __init__(self, data, volume):
+        super(FatXOrphan, self).__init__(data, volume)
+        self.cluster = None
+
+    @property
+    # @profile
     def is_valid(self):
         """ Checks if this recovered dirent is actually valid. """
-        name_len = self.file_name_length
+        name_len = DIRENT_DELETED if self.deleted else len(self.file_name)
 
         # DIRENT_NEVER_USED is never set by the kernel
         # DIRENT_NEVER_USED2 is set during initialization
@@ -29,12 +34,12 @@ class FatXOrphan(FatXDirent):
 
         # FILE or DIR
         if (self.file_attributes != 0x00 and
-            self.file_attributes != 0x10):
+                self.file_attributes != 0x10):
             return False
 
         # validate file name length
         if (name_len not in (DIRENT_DELETED, DIRENT_NEVER_USED2)
-            and name_len > FATX_FILE_NAME_LEN):
+                and name_len > FATX_FILE_NAME_LEN):
             return False
 
         # check if it points outside of the partition
@@ -45,42 +50,17 @@ class FatXOrphan(FatXDirent):
         if not all(c in VALID_CHARS for c in self.file_name):
             return False
 
-        def is_valid_date(dt):
-            if dt is None:
-                # There has to be a date defined.
-                return False
-
-            # FIXME: year is relative to 2000 and 1980
-            # FIXME: on XOG and X360 respectively
-            #if not (2000 <= dt.year <= date.today().year):
-            #    return False
-
-            # validate date
-            try:
-                datetime(
-                    year=dt.year,
-                    month=dt.month,
-                    day=dt.day,
-                    hour=dt.hour,
-                    minute=dt.min,
-                    second=dt.sec
-                )
-            except ValueError:
-                return False
-
-            return True
-
         # validate file time stamps
-        if (not is_valid_date(self.creation_time) or
-            not is_valid_date(self.last_write_time) or
-            not is_valid_date(self.last_access_time)):
+        if (not self.creation_time.is_valid or
+                not self.last_write_time.is_valid or
+                not self.last_access_time.is_valid):
             return False
 
         return True
 
     def add_child(self, child):
         """ This child belongs to this dirent. """
-        if not self.is_directory():
+        if self.is_file:
             raise Exception("Only directories can have children!")
 
         self.children.append(child)
@@ -119,9 +99,10 @@ class FatXAnalyzer:
     """ Analyzes a FatX partition for deleted files. """
     def __init__(self, volume):
         self.volume = volume
-        self.roots = []     # List[FatXOrphan]
-        self.orphanage = [] # List[FatXOrphan]
+        self.roots = []      # List[FatXOrphan]
+        self.orphanage = []  # List[FatXOrphan]
         self.current_block = 0
+        self.found_signatures = []
 
     # TODO: add constructor for finding files with corrupted FatX volume metadata
     def get_orphanage(self):
@@ -147,12 +128,12 @@ class FatXAnalyzer:
         if interval not in (1, 0x200, 0x1000, 0x4000):
             return ValueError("Valid intervals are 1, 0x20, 0x1000, or 0x4000.")
 
-        if (length == 0 or length > self.volume.length):
+        if length == 0 or length > self.volume.length:
             length = self.volume.length
 
         time0 = time.time()
         self.found_signatures = []
-        for index in xrange(length / interval):
+        for index in range(length / interval):
             self.current_block = index
             offset = index * interval
             for signature in signatures:
@@ -161,7 +142,7 @@ class FatXAnalyzer:
                 if test.test():
                     test.parse()
                     self.found_signatures.append(test)
-                    print(test)
+                    LOG.debug('%s', test)
         time1 = time.time()
         LOG.info('analysis finished in %s', time1 - time0)
 
@@ -182,7 +163,7 @@ class FatXAnalyzer:
         """ Begin search for orphaned dirents. """
         orphans = []
         if (max_clusters > self.volume.max_clusters or
-            max_clusters == 0):
+                max_clusters == 0):
             max_clusters = self.volume.max_clusters
 
         for cluster in range(1, max_clusters):
@@ -200,7 +181,7 @@ class FatXAnalyzer:
 
                 dirent = FatXOrphan(cache[offset:offset+0x40], self.volume)
 
-                if dirent.is_valid():
+                if dirent.is_valid:
                     dirent.set_cluster(cluster)
                     orphans.append(dirent)
 

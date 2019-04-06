@@ -1,31 +1,126 @@
 import struct
 import os
+import logging
 
+from datetime import datetime
+
+
+# TODO: Perhaps get rid of this and just use datetime?
 class FatXTimeStamp(object):
-    __slots__ = ('time')
-    def __init__(self, time_stamp):
-        self.time = time_stamp
+    """Holds a raw time stamp read directly from a FATX file system and converts to regular time units"""
+    def __new__(cls, raw_val=0):
+        """
+        Args:
+            raw_val (int): The raw integer read from the file system. Defaults to 0.
+        """
+        if cls is FatXTimeStamp:
+            raise TypeError('Cannot instantiate FatXTimeStamp directly')
+
+        return super(FatXTimeStamp, cls).__new__(cls)
+
+    def __init__(self, raw_val=0):
+        """
+        Args:
+            raw_val (int): The raw integer read from the file system. Defaults to 0.
+        """
+        self._time = raw_val
+        self._year = self._month = self._day = self._hour = self._min = self._sec = None
 
     def __str__(self):
         return '{}/{}/{} {}:{:02d}:{:02d}'.format(
             self.month, self.day, self.year,
             self.hour, self.min, self.sec
+        )
+
+    @property
+    def _log(self):
+        return logging.getLogger('FATX.FileSystem.TimeStamp')
+
+    @property
+    def year(self):
+        raise NotImplementedError
+
+    @property
+    def month(self):
+        if not self._month:
+            self._month = (self._time & 0x1E00000) >> 21
+        return self._month
+
+    @property
+    def day(self):
+        if not self._day:
+            self._day = (self._time & 0x1F0000) >> 16
+        return self._day
+
+    @property
+    def hour(self):
+        if not self._hour:
+            self._hour = (self._time & 0xF800) >> 11
+        return self._hour
+
+    @property
+    def min(self):
+        if not self._min:
+            self._min = (self._time & 0x7E0) >> 5
+        return self._min
+
+    @property
+    def sec(self):
+        if not self._sec:
+            self._sec = self._time & 0x1F
+        return self._sec
+
+    @property
+    def is_valid(self):
+        """Is this a valid date that makes sense?"""
+        try:
+            datetime(
+                year=self.year,
+                month=self.month,
+                day=self.day,
+                hour=self.hour,
+                minute=self.min,
+                second=self.sec
             )
-    
-    # FIXME: year is relative to 2000 and 1980
-    # FIXME: on XOG and X360 respectively
+        except ValueError:
+            return False
+
+        return True
+
+
+class X360TimeStamp(FatXTimeStamp):
+    """A FatXTimeStamp for Xbox 360."""
     @property
-    def year(self): return (((self.time & 0xFE000000) >> 25) + 1980)
+    def _log(self):
+        return logging.getLogger('FATX.FileSystem.TimeStamp.X360')
+
     @property
-    def month(self): return ((self.time & 0x1E00000) >> 21)
+    def year(self):
+        """
+        Returns (int):
+            the year
+        """
+        if not self._year:
+            self._year = ((self._time & 0xFE000000) >> 25) + 1980
+        return self._year
+
+
+class XTimeStamp(FatXTimeStamp):
+    """A FatXTimeStamp for Xbox."""
     @property
-    def day(self): return ((self.time & 0x1F0000) >> 16)
+    def _log(self):
+        return logging.getLogger('FATX.FileSystem.TimeStamp.X')
+
     @property
-    def hour(self): return ((self.time & 0xF800) >> 11)
-    @property
-    def min(self): return ((self.time & 0x7E0) >> 5)
-    @property
-    def sec(self): return ((self.time & 0x1F))
+    def year(self):
+        """
+        Returns (int):
+            the year
+        """
+        if not self._year:
+            self._year = ((self._time & 0xFE000000) >> 25) + 2000
+        return self._year
+
 
 FATX_SECTOR_SIZE    = 0x200
 FATX_PAGE_SIZE      = 0x1000
@@ -45,16 +140,17 @@ DIRENT_NEVER_USED   = 0x00
 DIRENT_DELETED      = 0xE5
 DIRENT_NEVER_USED2  = 0xFF
 
+
 class FatXDirent:
     def __init__(self, data, volume):
-        (self.file_name_length,
+        (file_name_length,
          self.file_attributes,
          self.file_name,
          self.first_cluster,
          self.file_size,
-         self.creation_time_i,
-         self.last_write_time_i,
-         self.last_access_time_i) = struct.unpack(volume.DIRENT_FORMAT, data)
+         creation_time_i,
+         last_write_time_i,
+         last_access_time_i) = struct.unpack(volume.DIRENT_FORMAT, data)
 
         self.children = []
         self.parent = None
@@ -63,48 +159,46 @@ class FatXDirent:
         self.last_write_time = None
         self.last_access_time = None
 
-        # Optimization: Avoid creating time stamp objects
-        # Marks the end of a directory stream
-        if (self.file_name_length == DIRENT_NEVER_USED or
-            self.file_name_length == DIRENT_NEVER_USED2):
-            return
+        x360 = self.volume.endian_fmt == '>'
+        ts = X360TimeStamp if x360 else XTimeStamp
+        self.creation_time = ts(creation_time_i)
+        self.last_write_time = ts(last_write_time_i)
+        self.last_access_time = ts(last_access_time_i)
+        self.deleted = file_name_length == DIRENT_DELETED
 
-        self.creation_time = FatXTimeStamp(self.creation_time_i)
-        self.last_write_time = FatXTimeStamp(self.last_write_time_i)
-        self.last_access_time = FatXTimeStamp(self.last_access_time_i)
-
-        if self.file_name_length == DIRENT_DELETED:
+        if self.deleted:
             self.file_name = self.file_name.split('\xff')[0]
+        elif file_name_length not in (DIRENT_NEVER_USED, DIRENT_NEVER_USED):
+            self.file_name = self.file_name[:file_name_length]
         else:
-            self.file_name = self.file_name[:self.file_name_length]
+            # TODO: I don't like that file_name is None means this is invalid. Perhaps we should raise an exception here
+            #   and catch that? Perhaps TypeError
+            self.file_name = None
+
+    @property
+    def _log(self):
+        return logging.getLogger('FATX.FileSystem.DirEnt')
 
     @classmethod
-    def from_file(cls, file, volume):
-        data = file.read(0x40)
+    def from_file(cls, f, volume):
+        data = f.read(0x40)
         return cls(data, volume)
 
     def add_dirent_stream_to_this_directory(self, stream):
-        if not self.is_directory():
+        if not self.is_directory:
             raise Exception("This dirent is not a directory!")
 
         for dirent in stream:
             dirent.parent = self
             self.children.append(dirent)
 
+    @property
     def is_file(self):
-        if self.file_attributes & FILE_ATTRIBUTE_DIRECTORY:
-            return False
-        return True
-    
-    def is_directory(self):
-        if self.file_attributes & FILE_ATTRIBUTE_DIRECTORY:
-            return True
-        return False
+        return not self.is_directory
 
-    def is_deleted(self):
-        if self.file_name_length == DIRENT_DELETED:
-            return True
-        return False
+    @property
+    def is_directory(self):
+        return bool(self.file_attributes & FILE_ATTRIBUTE_DIRECTORY)
 
     ###########################################
     # TODO: need to move these to FatXVolume
@@ -119,35 +213,31 @@ class FatXDirent:
                 break
             cluster = fat[cluster]
 
-        file = open(path, 'wb')
-        file.write(buffer[:self.file_size])
-        file.close()
-
-    def _write_dir(self, path):
-        if not os.path.exists(path):
-            os.makedirs(path)
+        f = open(path, 'wb')
+        f.write(buffer[:self.file_size])
+        f.close()
 
     def write(self, path):
-        if self.is_directory():
-            self._write_dir(path)
+        if self.is_directory:
+            if not os.path.exists(path):
+                os.makedirs(path)
         else:
             self._write_file(path)
 
     def recover(self, path, undelete=False):
         """ Recover legitimately using the FAT. """
-        if (self.is_deleted() and
-            undelete == False):
+        if self.deleted and not undelete:
             return
         whole_path = path + '/' + self.file_name
         # print attributes (dir/file/del)
-        if self.is_directory():
+        if self.is_directory:
             prefix = 'DIR  '
         else:
             prefix = 'FILE '
-        if self.is_deleted():
+        if self.deleted:
             prefix = 'DEL  '
-        print prefix + whole_path
-        if self.is_directory():
+        self._log.debug('%s', prefix + whole_path)
+        if self.is_directory:
             # create directory
             self.write(whole_path)
             for dirent in self.children:
@@ -178,25 +268,25 @@ class FatXDirent:
         return attributes
 
     def print_dirent(self, root_path):
-        if self.is_deleted():
+        if self.deleted:
             return
 
-        if self.is_directory():
+        if self.is_directory:
             prefix = 'DIR  '
         else:
             prefix = 'FILE '
 
         whole_path = root_path + '/' + self.file_name
-        print prefix + whole_path
-        if self.is_directory():
+        self._log.debug('%s', prefix + whole_path)
+        if self.is_directory:
             for child in self.children:
                 child.print_dirent(whole_path)
 
     def print_fields(self):
         def print_aligned(header, value):
-            print "{:<26} {}".format(header, value)
+            self._log.critical('%-26s %s', header, value)
 
-        print_aligned("FileNameLength:", self.file_name_length)
+        print_aligned("FileNameLength:", DIRENT_DELETED if self.deleted else len(self.file_name))
         print_aligned("FileName:", self.file_name)
         print_aligned("FileSize:", '0x{:x} bytes'.format(self.file_size))
         print_aligned("FileAttributes:", self.format_attributes())
@@ -205,14 +295,24 @@ class FatXDirent:
         print_aligned("LastWriteTime:", str(self.last_write_time))
         print_aligned("LastAccessTime:", str(self.last_access_time))
 
+
 class FatXVolume(object):
-    def __init__(self, file, offset, length, endian):
-        self.infile = file
+    def __init__(self, f, offset, length, endian):
+        self.infile = f
         self.offset = offset
         self.length = length
-        self.endian_fmt = '<' if endian == 0 else '>'
+        self.endian_fmt = endian
         self.FATX_FORMAT = self.endian_fmt + 'LLLL'
         self.DIRENT_FORMAT = self.endian_fmt + 'BB42sLLLLL'
+        self.file_allocation_table = []
+        self._root = []
+        self.signature = self.serial_number = self.sectors_per_cluster = self.root_dir_first_cluster = \
+            self.bytes_per_cluster = self.max_clusters = self.fat_byte_offset = self.file_area_byte_offset = 0
+        self.fat16x = False
+
+    @property
+    def _log(self):
+        return logging.getLogger('FATX.FileSystem.Volume')
 
     def mount(self):
         # read volume metadata
@@ -265,7 +365,8 @@ class FatXVolume(object):
         (self.signature,
          self.serial_number,
          self.sectors_per_cluster,
-         self.root_dir_first_cluster) = struct.unpack(self.FATX_FORMAT, self.infile.read(struct.calcsize(self.FATX_FORMAT)))
+         self.root_dir_first_cluster) = struct.unpack(self.FATX_FORMAT,
+                                                      self.infile.read(struct.calcsize(self.FATX_FORMAT)))
 
         # TODO: Remove this in order to handle corrupted metadata
         if self.signature != FATX_SIGNATURE:
@@ -293,7 +394,7 @@ class FatXVolume(object):
         self.infile.seek(fat_offset)
         fat_format = construct_fat_format(self.max_clusters)
         fat_length = struct.calcsize(fat_format)
-        fat_table  = self.infile.read(fat_length)
+        fat_table = self.infile.read(fat_length)
         return [entry for entry in struct.unpack(fat_format, fat_table)]
 
     def calculate_offsets(self):
@@ -321,8 +422,7 @@ class FatXVolume(object):
 
     def populate_dirent_stream(self, stream):
         for dirent in stream:
-            if dirent.is_directory() and \
-                    not dirent.is_deleted(): # dirent stream is not guaranteed!
+            if dirent.is_directory and not dirent.deleted: # dirent stream is not guaranteed!
                 # TODO: don't do this with first_cluster... read from FAT!
                 dirent_stream = self.read_directory_stream( 
                     self.cluster_to_physical_offset(dirent.first_cluster))
@@ -335,12 +435,11 @@ class FatXVolume(object):
         stream = []
 
         self.infile.seek(offset)
-        for _ in xrange(256):
+        for _ in range(256):
             dirent = FatXDirent.from_file(self.infile, self)
 
             # check for end of dirent stream
-            if (dirent.file_name_length == DIRENT_NEVER_USED or
-                dirent.file_name_length == DIRENT_NEVER_USED2):
+            if dirent.file_name is None:
                 break
 
             stream.append(dirent)
@@ -348,20 +447,20 @@ class FatXVolume(object):
         return stream
 
     def print_volume_metadata(self):
-        def print_aligned(header, value=''):
-            print "{:<26} {}".format(header, value)
+        def print_aligned(header, value):
+            self._log.critical("%-26s %s", header, value)
 
         print_aligned("Signature:", self.signature)
         print_aligned("SerialNumber:", self.serial_number)
         print_aligned("SectorsPerCluster:", "{} (0x{:x} bytes)".format(
             self.sectors_per_cluster, self.sectors_per_cluster * FATX_SECTOR_SIZE))
         print_aligned('RootDirFirstCluster:', self.root_dir_first_cluster)
-        print
+        self._log.critical('')
 
-        print_aligned("Calculated Offsets:")
+        print_aligned("Calculated Offsets:", '')
         print_aligned("PartitionOffset:", "0x{:x}".format(self.offset))
         print_aligned("FatByteOffset:", "0x{:x} (+0x{:x})".format(
             self.byte_offset_to_physical_offset(self.fat_byte_offset), self.fat_byte_offset))
         print_aligned("FileAreaByteOffset:", "0x{:x} (+0x{:x})".format(
             self.byte_offset_to_physical_offset(self.file_area_byte_offset), self.file_area_byte_offset))
-        print
+        self._log.critical('')

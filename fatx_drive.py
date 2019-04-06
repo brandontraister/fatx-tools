@@ -1,26 +1,28 @@
 from fatx_filesystem import FatXVolume
+import logging
+
+LOG = logging.getLogger('FATX.Drive')
+
 
 class FatXDrive(object):
-    ENDIAN_LITTLE = 0
-    ENDIAN_BIG = 1
+    """A FATX drive."""
 
-    def __init__(self, file, endian):
-        self.file = file
-        self.endianess = endian
+    def __init__(self, f):
+        self.file = f
         self.partitions = []
 
-        file.seek(0, 2)
-        self.length = file.tell()
-        file.seek(0, 0)
+        f.seek(0, 2)
+        self.length = f.tell()
+        f.seek(0, 0)
 
     def add_partition(self, offset, length):
-        self.partitions.append(FatXVolume(self.file, offset, length, self.endianess))
+        self.partitions.append(FatXVolume(self.file, offset, length, self.BYTEORDER))
 
     def get_partition(self, index):
         return self.partitions[index-1]
 
     def print_partitions(self):
-        print "{:<6} {:<18} {}".format("Index", "Offset", "Length")
+        LOG.critical("%-6s %-18s %s", "Index", "Offset", "Length")
         for i, partition in enumerate(self.partitions):
-            print "{:<6} {:016x} {:016x}".format(i + 1, partition.offset, partition.length)
-        print
+            LOG.critical("%-6s 0x%-16x 0x%x", i + 1, partition.offset, partition.length)
+        LOG.critical('')

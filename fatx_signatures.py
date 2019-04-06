@@ -1,5 +1,6 @@
 import struct
 
+
 class FatXSignature(object):
     def __init__(self, offset, volume):
         self.file_length = 0
@@ -42,21 +43,21 @@ class FatXSignature(object):
         return struct.unpack(self.volume.endian_fmt + 'd', self.read(8))[0]
 
     def read_cstring(self):
-        str = []
+        s = []
         while True:
             c = self.read(1)
             if c == chr(0):
-                return "".join(str)
-            str.append(c)
+                return "".join(s)
+            s.append(c)
 
     def get_file_name(self):
         file_name = self.file_name
-        if file_name == None:
+        if file_name is None:
             # TODO: use file extension instead of classname
             if not hasattr(self.__class__, 'Unnamed_Counter'):
                 self.__class__.Unnamed_Counter = 1
             file_name = self.__class__.__name__.lower() + \
-                        str(self.__class__.Unnamed_Counter)
+                str(self.__class__.Unnamed_Counter)
             self.__class__.Unnamed_Counter += 1
         return file_name
 
@@ -64,15 +65,14 @@ class FatXSignature(object):
         file_name = self.get_file_name()
         whole_path = path + '/' + file_name
         with open(whole_path, 'wb') as f:
-            if (self.file_length != 0 and self.file_length < 0xffffffff):
+            if self.file_length != 0 and self.file_length < 0xffffffff:
                 self.seek(0)
                 data = self.read(self.file_length)
                 f.write(data)
 
     def __str__(self):
-        return "{} at 0x{:x} of length 0x{:x}".format(self.__class__.__name__,
-                                                      self.offset,
-                                                      self.file_length)
+        return "{} at 0x{:x} of length 0x{:x}".format(
+            self.__class__.__name__, self.offset, self.file_length)
 
 
 class XBESignature(FatXSignature):
@@ -100,39 +100,36 @@ class XBESignature(FatXSignature):
         debug_file_name = self.read_cstring()
         self.file_name = debug_file_name.split('.exe')[0] + '.xbe'
 
+
 class LiveSignature(FatXSignature):
     def test(self):
-        if self.read(4) == 'LIVE':
-            return True
-        return False
+        return self.read(4) == 'LIVE'
 
     def parse(self):
         self.file_length = 0
+
 
 class PDBSignature(FatXSignature):
     def test(self):
         magic = 'Microsoft C/C++ MSF 7.00'
-        if self.read(len(magic)) == magic:
-            return True
-        return False
+        return self.read(len(magic)) == magic
 
     def parse(self):
         self.file_length = 0
 
+
 class XEXSignature(FatXSignature):
     def test(self):
-        if self.read(4) == 'XEX2':
-            return True
-        return False
+        return self.read(4) == 'XEX2'
 
     def parse(self):
         self.seek(0x10)
         security_offset = self.read_u32()
         header_count = self.read_u32()
         file_name_offset = None
-        for x in xrange(header_count):
-            id = self.read_u32()
-            if id == 0x000183FF:
+        for x in range(header_count):
+            i = self.read_u32()
+            if i == 0x000183FF:
                 file_name_offset = self.read_u32()
             else:
                 self.read_u32()
