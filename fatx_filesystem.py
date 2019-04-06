@@ -168,12 +168,12 @@ class FatXDirent:
 
         if self.deleted:
             self.file_name = self.file_name.split('\xff')[0]
-        elif file_name_length not in (DIRENT_NEVER_USED, DIRENT_NEVER_USED):
-            self.file_name = self.file_name[:file_name_length]
-        else:
+        elif file_name_length in (DIRENT_NEVER_USED, DIRENT_NEVER_USED):
             # TODO: I don't like that file_name is None means this is invalid. Perhaps we should raise an exception here
             #   and catch that? Perhaps TypeError
             self.file_name = None
+        else:
+            self.file_name = self.file_name[:file_name_length]
 
     @property
     def _log(self):
@@ -315,6 +315,8 @@ class FatXVolume(object):
         return logging.getLogger('FATX.FileSystem.Volume')
 
     def mount(self):
+        self._log.info('Mounting volume at 0x%X (length=0x%X)', self.offset, self.length)
+
         # read volume metadata
         self.read_volume_metadata()
 
@@ -367,6 +369,8 @@ class FatXVolume(object):
          self.sectors_per_cluster,
          self.root_dir_first_cluster) = struct.unpack(self.FATX_FORMAT,
                                                       self.infile.read(struct.calcsize(self.FATX_FORMAT)))
+
+        self._log.debug('Volume serial number: 0x%X', self.serial_number)
 
         # TODO: Remove this in order to handle corrupted metadata
         if self.signature != FATX_SIGNATURE:
