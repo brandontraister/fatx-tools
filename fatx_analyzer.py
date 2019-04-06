@@ -27,8 +27,8 @@ class LimitedThreadPool(ThreadPool):
         if 'ignore_limits' in kwargs:
             ignore_limits = kwargs.pop('ignore_limits')
         if not ignore_limits:
-            while self._inqueue.qsize() > 100:
-                time.sleep(5)
+            while self._inqueue.qsize() > 1000:
+                time.sleep(2)
         super(LimitedThreadPool, self).apply_async(*args, **kwargs)
 
 
@@ -197,13 +197,18 @@ class FatXAnalyzer:
                 dirent = FatXOrphan(data[offset:offset+0x40], self.volume)
 
                 if dirent.is_valid:
-                    dirent.set_cluster(cluster)
+                    dirent.set_cluster(i)
                     orphans.append(dirent)
 
         tp = LimitedThreadPool()
 
-        for cluster in range(1, max_clusters):
-            tp.apply_async(read_cluster, args=(cluster, self.volume.read_cluster(cluster)))
+        for cluster in range(1, (max_clusters // 32) * 32 + 1, 32):
+            tp.apply_async(read_cluster, args=(cluster, [self.volume.read_cluster(cluster + i) for i in range(32)]))
+
+        cluster = (max_clusters // 32) * 32 + 1
+        if max_clusters % 32:
+            tp.apply_async(read_cluster,
+                           args=(cluster, [self.volume.read_cluster(cluster + i) for i in range(max_clusters % 32)]))
 
         tp.close()
         tp.join()

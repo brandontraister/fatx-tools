@@ -164,9 +164,11 @@ class FatXDirent(object):
             self.file_name = None
             return
         elif self.deleted:
-            self.file_name = self.file_name.split('\xff')[0]
+            self.file_name = self.file_name.split(b'\xff')[0]
         else:
             self.file_name = self.file_name[:file_name_length]
+
+        self.file_name = self.file_name.decode('utf-8', errors='ignore')
 
         self._log.debug('Read %s%s %s',
                         'deleted ' if self.deleted else '',
