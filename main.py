@@ -14,6 +14,13 @@ MODE_X360 = 1
 
 LOG = logging.getLogger('FATX')
 
+try:
+    xrange
+except NameError:
+    pass
+else:
+    __builtins__.__dict__['range'] = xrange
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Xbox 360 and Xbox Original drive utilities.")
@@ -56,7 +63,7 @@ if __name__ == "__main__":
     if log_verbosity != logging.NOTSET:
         # Did we specify a verbosity? The user must be serious about logging. Lets log everything to a file too,
         #   including debug if the level is set to debug.
-        _file = logging.FileHandler('fatx.log')
+        _file = logging.FileHandler('fatx.log', 'w', 'utf-8')
         _file.setLevel(logging.DEBUG)
         _file.setFormatter(
             logging.Formatter('%(module)s::%(funcName)s::%(lineno)d %(levelname).4s %(asctime)s - %(message)s'))
@@ -110,7 +117,7 @@ if __name__ == "__main__":
                             os.makedirs(args.outputpath)
 
                         for dirent in root_dir:
-                            dirent.recover(args.outputpath, args.undelete)
+                            dirent.recover(args.outputpath, fatx, args.undelete)
 
             # orphan scanner will look for anything that looks
             # like a valid DIRENT entry for complete file info
@@ -125,7 +132,7 @@ if __name__ == "__main__":
 
                 if args.recover:
                     for root in roots:
-                        root.rescue(args.outputpath)
+                        root.rescue(args.outputpath, fatx)
 
             # signature scanner will go through blocks of data
             # testing various signatures to see if they match
@@ -144,4 +151,4 @@ if __name__ == "__main__":
 
                 if args.recover:
                     for find in analyzer.found_signatures:
-                        find.recover(args.outputpath)
+                        find.recover(args.outputpath, fatx)

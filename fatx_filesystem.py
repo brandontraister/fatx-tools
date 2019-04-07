@@ -130,7 +130,7 @@ DIRENT_NEVER_USED2  = 0xFF
 
 
 class FatXDirent(object):
-    def __init__(self, data, volume):
+    def __init__(self, data, byteorder):
         (file_name_length,
          self.file_attributes,
          self.file_name,
@@ -138,23 +138,15 @@ class FatXDirent(object):
          self.file_size,
          creation_time_i,
          last_write_time_i,
-         last_access_time_i) = struct.unpack(volume.DIRENT_FORMAT, data)
+         last_access_time_i) = struct.unpack(byteorder + 'BB42sLLLLL', data)
 
         self.children = []
         self.parent = None
-        self.volume = volume
         self.creation_time = None
         self.last_write_time = None
         self.last_access_time = None
         self.deleted = True
         self._log = logging.getLogger('FATX.FileSystem.DirEnt')
-
-        x360 = self.volume.endian_fmt == '>'
-        ts = X360TimeStamp if x360 else XTimeStamp
-        self.creation_time = ts(creation_time_i)
-        self.last_write_time = ts(last_write_time_i)
-        self.last_access_time = ts(last_access_time_i)
-        self.deleted = file_name_length == DIRENT_DELETED
 
         # DIRENT_NEVER_USED is never set by the kernel
         # DIRENT_NEVER_USED2 is set during initialization
@@ -163,22 +155,24 @@ class FatXDirent(object):
             #   and catch that? Perhaps TypeError
             self.file_name = None
             return
-        elif self.deleted:
+
+        ts = X360TimeStamp if byteorder == '>' else XTimeStamp
+        self.creation_time = ts(creation_time_i)
+        self.last_write_time = ts(last_write_time_i)
+        self.last_access_time = ts(last_access_time_i)
+        self.deleted = file_name_length == DIRENT_DELETED
+
+        if self.deleted:
             self.file_name = self.file_name.split(b'\xff')[0]
         else:
             self.file_name = self.file_name[:file_name_length]
 
         self.file_name = self.file_name.decode('utf-8', errors='ignore')
 
-        self._log.debug('Read %s%s %s',
-                        'deleted ' if self.deleted else '',
-                        'directory' if self.is_directory else 'file',
-                        self.file_name)
-
     @classmethod
-    def from_file(cls, f, volume):
+    def from_file(cls, f, byteorder):
         data = f.read(0x40)
-        return cls(data, volume)
+        return cls(data, byteorder)
 
     def add_dirent_stream_to_this_directory(self, stream):
         if not self.is_directory:
@@ -199,13 +193,13 @@ class FatXDirent(object):
     ###########################################
     # TODO: need to move these to FatXVolume
     # TODO: support files marked as deleted
-    def _write_file(self, path):
-        fat = self.volume.file_allocation_table
+    def _write_file(self, path, volume):
+        fat = volume.file_allocation_table
         cluster = self.first_cluster
         buffer = ''
         while True:
-            buffer += self.volume.read_cluster(cluster)
-            if cluster >= (0xfff0 if self.volume.fat16x else 0xfffffff0):
+            buffer += volume.read_cluster(cluster)
+            if cluster >= (0xfff0 if volume.fat16x else 0xfffffff0):
                 break
             cluster = fat[cluster]
 
@@ -213,14 +207,14 @@ class FatXDirent(object):
         f.write(buffer[:self.file_size])
         f.close()
 
-    def write(self, path):
+    def write(self, path, volume):
         if self.is_directory:
             if not os.path.exists(path):
                 os.makedirs(path)
         else:
-            self._write_file(path)
+            self._write_file(path, volume)
 
-    def recover(self, path, undelete=False):
+    def recover(self, path, volume, undelete=False):
         """ Recover legitimately using the FAT. """
         if self.deleted and not undelete:
             return
@@ -235,11 +229,11 @@ class FatXDirent(object):
         self._log.debug('%s', prefix + whole_path)
         if self.is_directory:
             # create directory
-            self.write(whole_path)
+            self.write(whole_path, volume)
             for dirent in self.children:
-                dirent.recover(whole_path, undelete)
+                dirent.recover(whole_path, undelete, volume)
         else:
-            self.write(whole_path)
+            self.write(whole_path, volume)
             # dump regular file
     ###########################################
 
@@ -299,7 +293,6 @@ class FatXVolume(object):
         self.length = length
         self.endian_fmt = endian
         self.FATX_FORMAT = self.endian_fmt + 'LLLL'
-        self.DIRENT_FORMAT = self.endian_fmt + 'BB42sLLLLL'
         self.file_allocation_table = []
         self._root = []
         self.signature = self.serial_number = self.sectors_per_cluster = self.root_dir_first_cluster = \
@@ -433,7 +426,7 @@ class FatXVolume(object):
 
         self.infile.seek(offset)
         for _ in range(256):
-            dirent = FatXDirent.from_file(self.infile, self)
+            dirent = FatXDirent.from_file(self.infile, self.endian_fmt)
 
             # check for end of dirent stream
             if dirent.file_name is None:

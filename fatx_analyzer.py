@@ -3,8 +3,10 @@ import time
 import os
 import string
 import logging
+import itertools
 
-from multiprocessing.pool import ThreadPool
+from collections import deque
+from multiprocessing.pool import Pool
 
 from fatx_filesystem import (FatXDirent,
                              DIRENT_DELETED, DIRENT_NEVER_USED,
@@ -16,32 +18,15 @@ VALID_CHARS = set(string.ascii_letters + string.digits + '!#$%&\'()-.@[]^_`{}~ '
 LOG = logging.getLogger('FATX.Analyzer')
 
 
-class LimitedThreadPool(ThreadPool):
-    """
-    A ThreadPool that will block on apply_async if there are too many items in the queue.
-
-    This is to avoid putting a 250GB file in the queue.
-    """
-    def apply_async(self, *args, **kwargs):
-        ignore_limits = False
-        if 'ignore_limits' in kwargs:
-            ignore_limits = kwargs.pop('ignore_limits')
-        if not ignore_limits:
-            while self._inqueue.qsize() > 1000:
-                time.sleep(2)
-        super(LimitedThreadPool, self).apply_async(*args, **kwargs)
-
-
 class FatXOrphan(FatXDirent):
     """ An orphaned directory entry. """
 
-    def __init__(self, data, volume):
-        super(FatXOrphan, self).__init__(data, volume)
+    def __init__(self, data, endian_fmt=None):
+        super(FatXOrphan, self).__init__(data, endian_fmt)
         self.cluster = None
 
-    @property
     # @profile
-    def is_valid(self):
+    def is_valid(self, max_clusters=float('inf')):
         """ Checks if this recovered dirent is actually valid. """
         if self.file_name is None:
             return False
@@ -59,7 +44,7 @@ class FatXOrphan(FatXDirent):
             return False
 
         # check if it points outside of the partition
-        if self.first_cluster > self.volume.max_clusters:
+        if self.first_cluster > max_clusters:
             return False
 
         # validate file name
@@ -89,10 +74,10 @@ class FatXOrphan(FatXDirent):
         """ This dirent belongs to this cluster. """
         self.cluster = cluster
 
-    def rescue(self, path):
+    def rescue(self, path, volume):
         """ This dumps without relying on the FAT. """
         whole_path = path + '/' + self.file_name
-        self.volume.seek_to_cluster(self.first_cluster)
+        volume.seek_to_cluster(self.first_cluster)
         LOG.info('Recovering: %r', whole_path)
         if self.is_directory():
             if not os.path.exists(whole_path):
@@ -102,13 +87,36 @@ class FatXOrphan(FatXDirent):
                     LOG.exception('Failed to create directory: %s', whole_path)
                     return
             for dirent in self.children:
-                dirent.rescue(whole_path)
+                dirent.rescue(whole_path, volume)
         else:
             try:
                 with open(whole_path, 'wb') as f:
-                    f.write(self.volume.infile.read(self.file_size))
+                    f.write(volume.infile.read(self.file_size))
             except (OSError, IOError):
                 LOG.exception('Failed to create file: %s', whole_path)
+
+
+def read_clusters(args):
+    i, data, byteorder, max_clusters = args
+    orphans = []
+
+    for k, c in enumerate(data):
+        i_c = i + k
+        for x in range(256):
+            offset = x * 0x40
+
+            # Optimization: Don't bother reading if file_name_length
+            # is DIRENT_NEVER_USED or DIRENT_NEVER_USED2
+            # Also avoid 1 character file_name_length
+            if c[offset] in (b'\x00', b'\x01', b'\xff'):
+                continue
+
+            dirent = FatXOrphan(c[offset:offset+0x40], byteorder)
+
+            if dirent.is_valid(max_clusters):
+                dirent.set_cluster(i_c)
+                orphans.append(dirent)
+    return orphans
 
 
 class FatXAnalyzer:
@@ -119,6 +127,7 @@ class FatXAnalyzer:
         self.orphanage = []  # List[FatXOrphan]
         self.current_block = 0
         self.found_signatures = []
+        self._log = logging.getLogger('FATX.Analyzer')
 
     # TODO: add constructor for finding files with corrupted FatX volume metadata
     def get_orphanage(self):
@@ -177,43 +186,36 @@ class FatXAnalyzer:
     # TODO: optimize file reading
     def recover_orphans(self, max_clusters=0):
         """ Begin search for orphaned dirents. """
-        orphans = []
         if (max_clusters > self.volume.max_clusters or
                 max_clusters == 0):
             max_clusters = self.volume.max_clusters
 
-        def read_cluster(i, data):
-            self.current_block = max(self.current_block, i)
+        tp = Pool()
 
-            for x in range(256):
-                offset = x * 0x40
-
-                # Optimization: Don't bother reading if file_name_length
-                # is DIRENT_NEVER_USED or DIRENT_NEVER_USED2
-                # Also avoid 1 character file_name_length
-                if data[offset] in ('\x00', '\x01', '\xff'):
-                    continue
-
-                dirent = FatXOrphan(data[offset:offset+0x40], self.volume)
-
-                if dirent.is_valid:
-                    dirent.set_cluster(i)
-                    orphans.append(dirent)
-
-        tp = LimitedThreadPool()
-
-        for cluster in range(1, (max_clusters // 32) * 32 + 1, 32):
-            tp.apply_async(read_cluster, args=(cluster, [self.volume.read_cluster(cluster + i) for i in range(32)]))
-
-        cluster = (max_clusters // 32) * 32 + 1
-        if max_clusters % 32:
-            tp.apply_async(read_cluster,
-                           args=(cluster, [self.volume.read_cluster(cluster + i) for i in range(max_clusters % 32)]))
+        ret = deque()
+        CHUNK_SIZE = 64  # How many clusters to send to each process? 64 clusters = 1MB
+        for k, res in enumerate(tp.imap(
+                read_clusters,
+                ((
+                        cluster,
+                        [self.volume.read_cluster(cluster + i) for i in range(CHUNK_SIZE)],
+                        self.volume.endian_fmt,
+                        self.volume.max_clusters
+                ) for cluster in range(1, (max_clusters // CHUNK_SIZE) * CHUNK_SIZE + 1, CHUNK_SIZE))
+        )):
+            ret.append(res)
 
         tp.close()
-        tp.join()
 
-        self.orphanage = orphans
+        self.orphanage = list(itertools.chain.from_iterable(ret))
+
+        cluster = (max_clusters // CHUNK_SIZE) * CHUNK_SIZE + 1
+        self.orphanage += read_clusters((
+            cluster,
+            [self.volume.read_cluster(cluster + i) for i in range(max_clusters % CHUNK_SIZE)],
+            self.volume.endian_fmt,
+            self.volume.max_clusters
+        ))
 
     def find_children(self, parent):
         """ Find children for this directory. """
